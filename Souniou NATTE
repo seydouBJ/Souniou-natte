@@ -1,0 +1,416 @@
+import io
+import sqlite3
+from datetime import datetime
+import pandas as pd
+import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+# --- CONFIGURATION DE L'APPLICATION (DOIT ÊTRE EN PREMIER) ---
+st.set_page_config(page_title="Souniou NATTE", page_icon="💰", layout="wide")
+
+
+# --- INITIALISATION DE LA BASE DE DONNÉES ---
+def init_db():
+    conn = sqlite3.connect("tontine_data.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS membres (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT NOT NULL,
+            telephone TEXT,
+            date_inscription TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cotisations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            membre_id INTEGER,
+            montant REAL,
+            date_paiement TEXT,
+            statut TEXT,
+            FOREIGN KEY (membre_id) REFERENCES membres(id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# --- FONCTIONS UTILITAIRES SQLITE ---
+def run_query(query, params=()):
+    with sqlite3.connect("tontine_data.db") as conn:
+        return pd.read_sql_query(query, conn, params=params)
+
+
+def run_action(query, params=()):
+    with sqlite3.connect("tontine_data.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+
+
+# --- FONCTION DE GÉNÉRATION DE PDF ---
+def generer_pdf(df, titre_document):
+    """Génère un fichier PDF soigné à partir d'un DataFrame Pandas"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30,
+    )
+    elements = []
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleStyle",
+        parent=styles["Heading1"],
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#1E3A8A"),
+        spaceAfter=15,
+    )
+    date_style = ParagraphStyle(
+        "DateStyle",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.gray,
+        spaceAfter=20,
+    )
+    cell_style = ParagraphStyle("CellStyle", parent=styles["Normal"], fontSize=9)
+    header_style = ParagraphStyle(
+        "HeaderStyle",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.white,
+        fontName="Helvetica-Bold",
+    )
+
+    elements.append(Paragraph(titre_document, title_style))
+    elements.append(
+        Paragraph(
+            f"Généré le : {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+            date_style,
+        )
+    )
+    elements.append(Spacer(1, 10))
+
+    data = []
+    data.append([Paragraph(str(col), header_style) for col in df.columns])
+
+    for _, row in df.iterrows():
+        ligne = []
+        for val in row:
+            if isinstance(val, (int, float)):
+                val_str = f"{val:,}".replace(",", " ")
+            else:
+                val_str = str(val)
+            ligne.append(Paragraph(val_str, cell_style))
+        data.append(ligne)
+
+    tableau_pdf = Table(data, hAlign="LEFT")
+    style_table = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("TOPPADDING", (0, 0), (-1, 0), 8),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#1E3A8A")),
+    ])
+
+    for i in range(1, len(data)):
+        if i % 2 == 0:
+            style_table.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F3F4F6"))
+
+    tableau_pdf.setStyle(style_table)
+    elements.append(tableau_pdf)
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
+# --- EN-TÊTE DE L'APPLICATION ---
+st.title("💰 Souniou NATTE")
+st.write(
+    "Une solution simple pour éliminer les erreurs de calcul et suivre les cotisations."
+)
+st.markdown("---")
+
+# --- NAVIGATION SIDEBAR ---
+if "page_active" not in st.session_state:
+    st.session_state["page_active"] = "Tableau de bord"
+
+st.sidebar.title("📌 Navigation")
+
+pages = [
+    ("📊 Tableau de bord", "Tableau de bord"),
+    ("👤 S'inscrire Membre", "S'inscrire Membre"),
+    ("💵 Enregistrer une Cotisation", "Enregistrer une Cotisation"),
+    ("📜 Historique et rapports", "Historique et rapports"),
+    ("⚙️ Gérer les membres", "Gérer les membres"),
+]
+
+for label, id_page in pages:
+    if st.sidebar.button(
+        label,
+        use_container_width=True,
+        type=(
+            "primary"
+            if st.session_state["page_active"] == id_page
+            else "secondary"
+        ),
+    ):
+        st.session_state["page_active"] = id_page
+        st.rerun()
+
+choix = st.session_state["page_active"]
+
+
+# --- LOGIQUE DES PAGES ---
+
+# 1. TABLEAU DE BORD (Liste des membres uniquement en PDF)
+if choix == "Tableau de bord":
+    st.subheader("📊 État Général de la Tontine")
+
+    total_membres = run_query("SELECT COUNT(*) as total FROM membres").iloc[0][
+        "total"
+    ]
+    total_caisse = run_query(
+        "SELECT SUM(montant) as total FROM cotisations WHERE statut='Payé'"
+    ).iloc[0]["total"]
+    total_caisse = total_caisse if total_caisse else 0.0
+
+    col1, col2 = st.columns(2)
+    col1.metric("Nombre total de membres", f"{total_membres} membres")
+    col2.metric("Total en Caisse", f"{total_caisse:,} FCFA".replace(",", " "))
+
+    st.markdown("---")
+    st.write("### 👥 Liste des Membres Inscrits")
+    df_membres = run_query(
+        "SELECT id as 'ID', nom as 'Nom Complet', telephone as 'Téléphone', date_inscription as 'Date Inscription' FROM membres"
+    )
+
+    if not df_membres.empty:
+        st.dataframe(df_membres, use_container_width=True)
+
+        # Bouton PDF uniquement
+        pdf_membres = generer_pdf(df_membres, "Liste des Membres Inscrits")
+        st.download_button(
+            label="📥 Télécharger la liste des membres (PDF)",
+            data=pdf_membres,
+            file_name=f"liste_membres_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+        )
+    else:
+        st.info("Aucun membre inscrit pour le moment.")
+
+
+# 2. S'INSCRIRE MEMBRE
+elif choix == "S'inscrire Membre":
+    st.subheader("👤 Ajouter un nouveau membre")
+
+    with st.form("form_membre", clear_on_submit=True):
+        nom = st.text_input("Nom et Prénom du membre :")
+        telephone = st.text_input("Numéro de Téléphone :")
+        soumettre = st.form_submit_button("Enregistrer le membre")
+
+        if soumettre:
+            if nom:
+                date_actuelle = datetime.now().strftime("%Y-%m-%d %H:%M")
+                run_action(
+                    "INSERT INTO membres (nom, telephone, date_inscription) VALUES (?, ?, ?)",
+                    (nom, telephone, date_actuelle),
+                )
+                st.success(f"🎉 {nom} a été inscrit avec succès !")
+                st.rerun()
+            else:
+                st.error("Le nom est obligatoire.")
+
+
+# 3. ENREGISTRER UNE COTISATION
+elif choix == "Enregistrer une Cotisation":
+    st.subheader("💵 Encaisser une cotisation")
+
+    df_membres = run_query("SELECT id, nom FROM membres")
+
+    if df_membres.empty:
+        st.warning(
+            "Veuillez d'abord inscrire des membres avant d'enregistrer des cotisations."
+        )
+    else:
+        liste_membres = {
+            row["nom"]: row["id"] for _, row in df_membres.iterrows()
+        }
+
+        with st.form("form_cotisation", clear_on_submit=True):
+            membre_selectionne = st.selectbox(
+                "Sélectionner le membre :", list(liste_membres.keys())
+            )
+            montant = st.number_input(
+                "Montant de la cotisation (FCFA) :", min_value=0, step=500
+            )
+            statut = st.selectbox("Statut :", ["Payé", "Avance", "Retard"])
+            soumettre_cotisation = st.form_submit_button("Valider le paiement")
+
+            if soumettre_cotisation:
+                membre_id = liste_membres[membre_selectionne]
+                date_paiement = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                run_action(
+                    "INSERT INTO cotisations (membre_id, montant, date_paiement, statut) VALUES (?, ?, ?, ?)",
+                    (membre_id, montant, date_paiement, statut),
+                )
+                st.success(
+                    f"✅ Cotisation de {montant:,} FCFA enregistrée pour {membre_selectionne} !".replace(
+                        ",", " "
+                    )
+                )
+
+
+# 4. HISTORIQUE ET RAPPORTS (Téléchargements uniquement en PDF)
+elif choix == "Historique et rapports":
+    st.subheader("📜 Historique de toutes les transactions")
+
+    query_historique = """
+        SELECT c.id as 'ID Transaction', m.nom as 'Nom du Membre', c.montant as 'Montant (FCFA)',
+               c.date_paiement as 'Date & Heure', c.statut as 'Statut'
+        FROM cotisations c
+        JOIN membres m ON c.membre_id = m.id
+        ORDER BY c.date_paiement DESC
+    """
+    df_transactions = run_query(query_historique)
+
+    if not df_transactions.empty:
+        total_montant = df_transactions["Montant (FCFA)"].sum()
+
+        ligne_total = pd.DataFrame({
+            "ID Transaction": ["TOTAL"],
+            "Nom du Membre": ["-"],
+            "Montant (FCFA)": [total_montant],
+            "Date & Heure": ["-"],
+            "Statut": ["-"],
+        })
+
+        df_affichage = pd.concat(
+            [df_transactions, ligne_total], ignore_index=True
+        )
+        st.dataframe(df_affichage, use_container_width=True)
+
+        # Actions de correction
+        st.markdown("---")
+        st.write("### ✏️ Corriger une erreur de saisie")
+        liste_ids = df_transactions["ID Transaction"].tolist()
+
+        col_select, col_btn = st.columns([2, 1])
+        with col_select:
+            id_a_supprimer = st.selectbox(
+                "Sélectionner l'ID de la transaction erronée à effacer :",
+                liste_ids,
+            )
+        with col_btn:
+            st.write("##")
+            if st.button("🗑️ Annuler cette cotisation", type="secondary"):
+                run_action(
+                    "DELETE FROM cotisations WHERE id = ?",
+                    (int(id_a_supprimer),),
+                )
+                st.success(
+                    f"La cotisation N°{id_a_supprimer} a été retirée de l'historique."
+                )
+                st.rerun()
+
+        st.markdown("---")
+
+        # Bouton PDF pour l'historique global (Pas de CSV)
+        pdf_hist = generer_pdf(df_affichage, "Historique des Cotisations")
+        st.download_button(
+            label="📥 Télécharger l'historique des transactions (PDF)",
+            data=pdf_hist,
+            file_name=f"historique_tontine_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+        )
+    else:
+        st.info("Aucune transaction enregistrée.")
+
+    st.markdown("---")
+    st.subheader("📊 Total des cotisations par membre")
+
+    query_par_membre = """
+        SELECT m.nom as 'Nom du Membre', SUM(c.montant) as 'Total Cotisé (FCFA)'
+        FROM cotisations c
+        JOIN membres m ON c.membre_id = m.id
+        WHERE c.statut = 'Payé'
+        GROUP BY m.id, m.nom
+        ORDER BY SUM(c.montant) DESC
+    """
+    df_membres_total = run_query(query_par_membre)
+
+    if not df_membres_total.empty:
+        st.dataframe(df_membres_total, use_container_width=True)
+
+        # Bouton PDF pour la situation des membres (Pas de CSV)
+        pdf_membres_tot = generer_pdf(
+            df_membres_total, "Total des Cotisations par Membre"
+        )
+        st.download_button(
+            label="📥 Télécharger le rapport de cotisations par membre (PDF)",
+            data=pdf_membres_tot,
+            file_name=f"rapport_par_membre_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+        )
+    else:
+        st.info("Aucun cumul disponible.")
+
+
+# 5. GÉRER LES MEMBRES
+elif choix == "Gérer les membres":
+    st.subheader("⚙️ Administration des Membres")
+
+    df_membres = run_query("SELECT id, nom, telephone FROM membres")
+
+    if df_membres.empty:
+        st.info("Aucun membre enregistré à supprimer.")
+    else:
+        liste_membres = {
+            row["nom"]: row["id"] for _, row in df_membres.iterrows()
+        }
+
+        st.write("### 🚨 Supprimer un membre")
+        st.warning(
+            "Attention : Supprimer un membre effacera également TOUTES ses cotisations associées de manière définitive."
+        )
+
+        membre_a_supprimer = st.selectbox(
+            "Sélectionner le membre à supprimer :", list(liste_membres.keys())
+        )
+        membre_id = liste_membres[membre_a_supprimer]
+
+        confirmation = st.checkbox(
+            f"Je confirme vouloir supprimer définitivement {membre_a_supprimer} et tout son historique."
+        )
+
+        if st.button("❌ Supprimer le membre", type="primary"):
+            if confirmation:
+                run_action(
+                    "DELETE FROM cotisations WHERE membre_id = ?", (membre_id,)
+                )
+                run_action("DELETE FROM membres WHERE id = ?", (membre_id,))
+                st.success(
+                    f"💥 {membre_a_supprimer} et ses cotisations ont été supprimés avec succès."
+                )
+                st.rerun()
+            else:
+                st.error(
+                    "Veuillez cocher la case de confirmation avant de procéder à la suppression."
+                )  
